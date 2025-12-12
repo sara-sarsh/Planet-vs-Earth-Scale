@@ -1,0 +1,6 @@
+# Arduino
+*.elf
+*.hex
+*.ino.hex
+build/
+.DS_Store
