@@ -80,7 +80,7 @@ Open Serial Monitor at **115200 baud**.
 
 ## Author
 
-**Sara** - *Creator & Lead Developer*
+**Sara Sa** - *Creator & Lead Developer*
 
 ## License
 MIT
