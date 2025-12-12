@@ -78,5 +78,9 @@ Open Serial Monitor at **115200 baud**.
 - `OFF <value>`: Manually set offset.
 - `SAVE` / `LOAD`: Save to or load from EEPROM.
 
+## Author
+
+**Sara** - *Creator & Lead Developer*
+
 ## License
 MIT

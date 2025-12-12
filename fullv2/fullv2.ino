@@ -1,3 +1,12 @@
+/*
+ * Interplanetary Weight Scale
+ * ---------------------------
+ * Created by: Sara
+ * Date: 2025
+ * 
+ * Description: Calculates and displays weight on different planets.
+ */
+
 #include <EEPROM.h>
 #include "LedControl.h"
 #include "HX711.h"
