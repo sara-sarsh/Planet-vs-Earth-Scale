@@ -32,6 +32,7 @@ HX711 scale;
 #define EEPROM_OFFSET_ADDR 8
 #define EEPROM_PLANET_ADDR 12
 #define EEPROM_TRIM_ADDR 16
+#define EEPROM_AUTOTARE_ADDR 20
 #define EEPROM_MAGIC_FLAG 0xA5
 
 // ---------------- Planets ----------------
@@ -78,17 +79,12 @@ unsigned long lockStartMs = 0;
 unsigned long unlockStartMs = 0;
 
 // ---------------- Auto-Tare Strategy ----------------
-// Detects when scale is placed on a new surface and auto-tares
-const float AUTO_TARE_STABILITY_KG = 0.15f;    // weight change threshold to detect stability
-const unsigned long AUTO_TARE_WAIT_MS = 800;   // time to wait for stability before taring
-const float AUTO_TARE_MIN_WEIGHT_KG = 0.5f;    // minimum weight to trigger auto-tare (avoid empty scale)
+// Detects surface on startup and auto-tares once
 const unsigned long AUTO_TARE_STARTUP_WAIT_MS = 2000; // wait time for startup auto-tare detection
 
-float lastStableWeight = 0.0f;                  // last recorded stable weight
-unsigned long autoTareStabilityStartMs = 0;    // when current stability window started
-bool autoTareEnabled = true;                    // can be toggled via serial
 bool startupAutoTareActive = false;             // true during startup auto-tare phase
 unsigned long startupAutoTareStartMs = 0;      // when startup auto-tare started
+bool autoTareEnabled = true;                    // can be toggled via serial
 
 // ---------------- Smoothing ----------------
 float earthWeightDisplay = 0.0f;
@@ -213,6 +209,7 @@ void saveSettings() {
   EEPROM.put(EEPROM_OFFSET_ADDR, tareOffset);
   EEPROM.put(EEPROM_PLANET_ADDR, currentPlanet);
   EEPROM.put(EEPROM_TRIM_ADDR, boardTrim);
+  EEPROM.put(EEPROM_AUTOTARE_ADDR, autoTareEnabled);
 }
 
 void loadSettings() {
@@ -222,6 +219,7 @@ void loadSettings() {
   EEPROM.get(EEPROM_OFFSET_ADDR, tareOffset);
   EEPROM.get(EEPROM_PLANET_ADDR, currentPlanet);
   EEPROM.get(EEPROM_TRIM_ADDR, boardTrim);
+  EEPROM.get(EEPROM_AUTOTARE_ADDR, autoTareEnabled);
 
   if (!isfinite(boardTrim) || boardTrim < 0.80f || boardTrim > 1.20f)
     boardTrim = 1.0f;
@@ -416,23 +414,22 @@ void serialPoll() {
       // Auto-tare control commands
       if (ieq(p, "AUTOTARE ON")) {
         autoTareEnabled = true;
-        Serial.println(F("[SER] Auto-Tare ENABLED - will auto-detect surfaces"));
+        saveSettings();
+        Serial.println(F("[SER] Auto-Tare ENABLED - will auto-tare on startup"));
         return;
       }
       if (ieq(p, "AUTOTARE OFF")) {
         autoTareEnabled = false;
-        autoTareStabilityStartMs = 0;
+        startupAutoTareActive = false;
+        saveSettings();
         Serial.println(F("[SER] Auto-Tare DISABLED"));
         return;
       }
       if (ieq(p, "AUTOTARE STATUS")) {
         Serial.print(F("[SER] Auto-Tare: "));
         Serial.println(autoTareEnabled ? "ENABLED" : "DISABLED");
-        Serial.print(F("[SER] Stability threshold: "));
-        Serial.print(AUTO_TARE_STABILITY_KG, 2);
-        Serial.println(F(" kg"));
-        Serial.print(F("[SER] Wait time: "));
-        Serial.print(AUTO_TARE_WAIT_MS);
+        Serial.print(F("[SER] Startup wait time: "));
+        Serial.print(AUTO_TARE_STARTUP_WAIT_MS);
         Serial.println(F(" ms"));
         return;
       }
@@ -558,76 +555,26 @@ void calibrationLoop() {
 }
 
 // ---------------- Auto-Tare Handler ----------------
-// Detects when weight stabilizes on a new surface and automatically tares
+// Only tares once on startup when weight stabilizes
 void updateAutoTare(float currentEarthWeight) {
-  if (!autoTareEnabled || mode != MODE_RUN) {
-    autoTareStabilityStartMs = 0;
-    startupAutoTareActive = false;
+  if (!autoTareEnabled || mode != MODE_RUN || !startupAutoTareActive) {
     return;
   }
 
-  // ========== STARTUP AUTO-TARE PHASE ==========
-  if (startupAutoTareActive) {
-    // Still in startup detection window
-    unsigned long startupTime = millis() - startupAutoTareStartMs;
-    
-    if (startupTime >= AUTO_TARE_STARTUP_WAIT_MS) {
-      // Startup phase complete - auto-tare the current weight
-      scale.tare();
-      tareOffset = scale.get_offset();
-      EEPROM.put(EEPROM_OFFSET_ADDR, tareOffset);
-      
-      Serial.print(F("[AUTO-TARE] STARTUP: Surface detected at "));
-      Serial.print(currentEarthWeight, 2);
-      Serial.println(F(" kg - Tared!"));
-      
-      startupAutoTareActive = false;
-      autoTareStabilityStartMs = 0;
-      lastStableWeight = 0.0f;
-    }
-    return;
-  }
-
-  // ========== RUNTIME AUTO-TARE PHASE ==========
-  // Ignore if weight is too close to zero (empty scale)
-  if (fabs(currentEarthWeight) < AUTO_TARE_MIN_WEIGHT_KG) {
-    autoTareStabilityStartMs = 0;
-    lastStableWeight = 0.0f;
-    return;
-  }
-
-  // Check if weight has changed significantly (new surface detected)
-  float weightDelta = fabs(currentEarthWeight - lastStableWeight);
+  // Check if startup window is complete
+  unsigned long startupTime = millis() - startupAutoTareStartMs;
   
-  if (weightDelta > AUTO_TARE_STABILITY_KG) {
-    // Weight changed -> reset stability timer
-    autoTareStabilityStartMs = millis();
-    lastStableWeight = currentEarthWeight;
-    return;
-  }
-
-  // Weight is stable within threshold
-  if (autoTareStabilityStartMs == 0) {
-    autoTareStabilityStartMs = millis();
-  }
-
-  unsigned long stabilityTime = millis() - autoTareStabilityStartMs;
-
-  if (stabilityTime >= AUTO_TARE_WAIT_MS) {
-    // Weight has been stable long enough -> AUTO-TARE!
+  if (startupTime >= AUTO_TARE_STARTUP_WAIT_MS) {
+    // Startup phase complete - auto-tare once and mark as done
     scale.tare();
     tareOffset = scale.get_offset();
     EEPROM.put(EEPROM_OFFSET_ADDR, tareOffset);
-
-    Serial.print(F("[AUTO-TARE] RUNTIME: New surface detected at "));
+    
+    Serial.print(F("[AUTO-TARE] STARTUP: Tared at "));
     Serial.print(currentEarthWeight, 2);
-    Serial.println(F(" kg - Tared!"));
-
-    // Reset for next surface
-    autoTareStabilityStartMs = 0;
-    lastStableWeight = 0.0f;
-    locked = false;
-    lockStartMs = 0;
+    Serial.println(F(" kg"));
+    
+    startupAutoTareActive = false;  // Done - won't tare again
   }
 }
 
