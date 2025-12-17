@@ -77,6 +77,16 @@ float lockedKg = 0.0f;
 unsigned long lockStartMs = 0;
 unsigned long unlockStartMs = 0;
 
+// ---------------- Auto-Tare Strategy ----------------
+// Detects when scale is placed on a new surface and auto-tares
+const float AUTO_TARE_STABILITY_KG = 0.15f;    // weight change threshold to detect stability
+const unsigned long AUTO_TARE_WAIT_MS = 800;   // time to wait for stability before taring
+const float AUTO_TARE_MIN_WEIGHT_KG = 0.5f;    // minimum weight to trigger auto-tare (avoid empty scale)
+
+float lastStableWeight = 0.0f;                  // last recorded stable weight
+unsigned long autoTareStabilityStartMs = 0;    // when current stability window started
+bool autoTareEnabled = true;                    // can be toggled via serial
+
 // ---------------- Smoothing ----------------
 float earthWeightDisplay = 0.0f;
 float objectWeightDisplay = 0.0f;
@@ -261,7 +271,7 @@ void printRunPromptOnce() {
   Serial.println(F("PLANET short press: next planet"));
   Serial.println(F("TARE short press  : ZERO"));
   Serial.println(F("TARE long press   : CALIBRATE (hold 1.2s)"));
-  Serial.println(F("Serial: HELP"));
+  Serial.println(F("Serial: HELP / AUTOTARE ON/OFF/STATUS"));
   Serial.println();
 }
 
@@ -293,6 +303,7 @@ void printTrimManual() {
   Serial.println(F("     -> uses your value and saves"));
   Serial.println(F(
       "Other commands: RUN / CAL / TRIM / SAVE / LOAD / SF x / OFF x / BT x"));
+  Serial.println(F("Auto-Tare: AUTOTARE ON / AUTOTARE OFF / AUTOTARE STATUS"));
   Serial.println();
 }
 
@@ -399,8 +410,32 @@ void serialPoll() {
         return;
       }
 
+      // Auto-tare control commands
+      if (ieq(p, "AUTOTARE ON")) {
+        autoTareEnabled = true;
+        Serial.println(F("[SER] Auto-Tare ENABLED - will auto-detect surfaces"));
+        return;
+      }
+      if (ieq(p, "AUTOTARE OFF")) {
+        autoTareEnabled = false;
+        autoTareStabilityStartMs = 0;
+        Serial.println(F("[SER] Auto-Tare DISABLED"));
+        return;
+      }
+      if (ieq(p, "AUTOTARE STATUS")) {
+        Serial.print(F("[SER] Auto-Tare: "));
+        Serial.println(autoTareEnabled ? "ENABLED" : "DISABLED");
+        Serial.print(F("[SER] Stability threshold: "));
+        Serial.print(AUTO_TARE_STABILITY_KG, 2);
+        Serial.println(F(" kg"));
+        Serial.print(F("[SER] Wait time: "));
+        Serial.print(AUTO_TARE_WAIT_MS);
+        Serial.println(F(" ms"));
+        return;
+      }
+
       Serial.println(F("[SER] Unknown command. Try: HELP / RUN / CAL / TRIM / "
-                       "KG 50.5 / OK"));
+                       "KG 50.5 / OK / AUTOTARE ON/OFF/STATUS"));
       return;
     }
 
@@ -516,6 +551,56 @@ void calibrationLoop() {
     while (digitalRead(BTN_TARE_PIN) == LOW) {
       delay(10);
     }
+  }
+}
+
+// ---------------- Auto-Tare Handler ----------------
+// Detects when weight stabilizes on a new surface and automatically tares
+void updateAutoTare(float currentEarthWeight) {
+  if (!autoTareEnabled || mode != MODE_RUN) {
+    autoTareStabilityStartMs = 0;
+    return;
+  }
+
+  // Ignore if weight is too close to zero (empty scale)
+  if (fabs(currentEarthWeight) < AUTO_TARE_MIN_WEIGHT_KG) {
+    autoTareStabilityStartMs = 0;
+    lastStableWeight = 0.0f;
+    return;
+  }
+
+  // Check if weight has changed significantly (new surface detected)
+  float weightDelta = fabs(currentEarthWeight - lastStableWeight);
+  
+  if (weightDelta > AUTO_TARE_STABILITY_KG) {
+    // Weight changed -> reset stability timer
+    autoTareStabilityStartMs = millis();
+    lastStableWeight = currentEarthWeight;
+    return;
+  }
+
+  // Weight is stable within threshold
+  if (autoTareStabilityStartMs == 0) {
+    autoTareStabilityStartMs = millis();
+  }
+
+  unsigned long stabilityTime = millis() - autoTareStabilityStartMs;
+
+  if (stabilityTime >= AUTO_TARE_WAIT_MS) {
+    // Weight has been stable long enough -> AUTO-TARE!
+    scale.tare();
+    tareOffset = scale.get_offset();
+    EEPROM.put(EEPROM_OFFSET_ADDR, tareOffset);
+
+    Serial.print(F("[AUTO-TARE] New surface detected at "));
+    Serial.print(currentEarthWeight, 2);
+    Serial.println(F(" kg - Tared!"));
+
+    // Reset for next surface
+    autoTareStabilityStartMs = 0;
+    lastStableWeight = 0.0f;
+    locked = false;
+    lockStartMs = 0;
   }
 }
 
@@ -644,6 +729,9 @@ void runLoop() {
 
   // read weights
   float earthWeight = scale.get_units(5) * boardTrim;
+
+  // Auto-tare: detect new surfaces and auto-save baseline
+  updateAutoTare(earthWeight);
 
   // RUN-only threshold -> force zero + fast drop
   if (fabs(earthWeight) < ZERO_THRESHOLD_KG) {
