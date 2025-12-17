@@ -82,10 +82,13 @@ unsigned long unlockStartMs = 0;
 const float AUTO_TARE_STABILITY_KG = 0.15f;    // weight change threshold to detect stability
 const unsigned long AUTO_TARE_WAIT_MS = 800;   // time to wait for stability before taring
 const float AUTO_TARE_MIN_WEIGHT_KG = 0.5f;    // minimum weight to trigger auto-tare (avoid empty scale)
+const unsigned long AUTO_TARE_STARTUP_WAIT_MS = 2000; // wait time for startup auto-tare detection
 
 float lastStableWeight = 0.0f;                  // last recorded stable weight
 unsigned long autoTareStabilityStartMs = 0;    // when current stability window started
 bool autoTareEnabled = true;                    // can be toggled via serial
+bool startupAutoTareActive = false;             // true during startup auto-tare phase
+unsigned long startupAutoTareStartMs = 0;      // when startup auto-tare started
 
 // ---------------- Smoothing ----------------
 float earthWeightDisplay = 0.0f;
@@ -559,9 +562,33 @@ void calibrationLoop() {
 void updateAutoTare(float currentEarthWeight) {
   if (!autoTareEnabled || mode != MODE_RUN) {
     autoTareStabilityStartMs = 0;
+    startupAutoTareActive = false;
     return;
   }
 
+  // ========== STARTUP AUTO-TARE PHASE ==========
+  if (startupAutoTareActive) {
+    // Still in startup detection window
+    unsigned long startupTime = millis() - startupAutoTareStartMs;
+    
+    if (startupTime >= AUTO_TARE_STARTUP_WAIT_MS) {
+      // Startup phase complete - auto-tare the current weight
+      scale.tare();
+      tareOffset = scale.get_offset();
+      EEPROM.put(EEPROM_OFFSET_ADDR, tareOffset);
+      
+      Serial.print(F("[AUTO-TARE] STARTUP: Surface detected at "));
+      Serial.print(currentEarthWeight, 2);
+      Serial.println(F(" kg - Tared!"));
+      
+      startupAutoTareActive = false;
+      autoTareStabilityStartMs = 0;
+      lastStableWeight = 0.0f;
+    }
+    return;
+  }
+
+  // ========== RUNTIME AUTO-TARE PHASE ==========
   // Ignore if weight is too close to zero (empty scale)
   if (fabs(currentEarthWeight) < AUTO_TARE_MIN_WEIGHT_KG) {
     autoTareStabilityStartMs = 0;
@@ -592,7 +619,7 @@ void updateAutoTare(float currentEarthWeight) {
     tareOffset = scale.get_offset();
     EEPROM.put(EEPROM_OFFSET_ADDR, tareOffset);
 
-    Serial.print(F("[AUTO-TARE] New surface detected at "));
+    Serial.print(F("[AUTO-TARE] RUNTIME: New surface detected at "));
     Serial.print(currentEarthWeight, 2);
     Serial.println(F(" kg - Tared!"));
 
@@ -837,6 +864,13 @@ void setup() {
   Serial.print(F("planet="));
   Serial.println(planetName[currentPlanet]);
   Serial.println(F("Type HELP for TRIM instructions."));
+
+  // Activate startup auto-tare if enabled
+  if (autoTareEnabled) {
+    startupAutoTareActive = true;
+    startupAutoTareStartMs = millis();
+    Serial.println(F("[AUTO-TARE] STARTUP phase active - 2 seconds to detect surface..."));
+  }
 
   // showPlanetNameOnce();
 }
